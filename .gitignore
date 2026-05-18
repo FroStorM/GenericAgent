@@ -1,0 +1,45 @@
+# macOS / editor
+.DS_Store
+**/.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+.venv-build-312/
+
+# Runtime / local data
+temp/
+tmp/
+tasks/
+sche_tasks/
+*.log
+**log.*
+model_responses.txt
+restore_commit.txt
+
+# Secrets / credentials
+.env
+auth.json
+mykey.py
+mykey.json
+assets/tmwd_cdp_bridge/config.js
+assets/copilot_proxy.pyw
+
+# Build cache
+build/
+dist/
+
+# Keep only the latest shareable package in Git.
+!dist/
+dist/*
+!dist/A3Agent-standalone-20260518.zip
