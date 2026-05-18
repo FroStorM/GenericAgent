@@ -65,6 +65,15 @@ createApp({
         const keyEditorSaving = ref(false);
         const keyEditorTestOk = ref(false);
         const keyEditorTestFingerprint = ref('');
+        const communicationTools = ref([]);
+        const communicationPath = ref('');
+        const selectedCommunicationId = ref('');
+        const communicationDrafts = ref({});
+        const communicationLoading = ref(false);
+        const communicationSaving = ref(false);
+        const communicationBusyId = ref('');
+        const communicationNotice = ref('');
+        const communicationError = ref('');
         const isComposing = ref(false);
         const renderLimit = ref(120);
         const stickToBottom = ref(true);
@@ -1084,6 +1093,7 @@ createApp({
                     await fetchStatus();
                     await fetchLlmConfigs();
                 }
+                if (name === 'communication') await fetchCommunicationConfigs();
                 if (name === 'todo') await fetchToDo();
                 if (name === 'sop') await fetchSopList();
                 if (name === 'schedule') await refreshScheduleList();
@@ -1337,6 +1347,174 @@ createApp({
                 closeKeyEditor();
             } catch (e) {
                 console.error('Delete llm config failed:', e);
+            }
+        };
+
+        const fetchCommunicationConfigs = async () => {
+            communicationLoading.value = true;
+            communicationError.value = '';
+            try {
+                const res = await fetch('/api/communication_configs');
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+                communicationTools.value = Array.isArray(data.tools) ? data.tools : [];
+                communicationPath.value = data.path || '';
+                const drafts = { ...communicationDrafts.value };
+                for (const tool of communicationTools.value) {
+                    if (!drafts[tool.id]) {
+                        drafts[tool.id] = {
+                            app_id: tool.app_id || '',
+                            secret: '',
+                            allowed_users: Array.isArray(tool.allowed_users) ? tool.allowed_users.join('\n') : ''
+                        };
+                    } else if (selectedCommunicationId.value !== tool.id) {
+                        drafts[tool.id] = {
+                            ...drafts[tool.id],
+                            app_id: tool.app_id || drafts[tool.id].app_id || '',
+                            allowed_users: Array.isArray(tool.allowed_users) ? tool.allowed_users.join('\n') : (drafts[tool.id].allowed_users || '')
+                        };
+                    }
+                }
+                communicationDrafts.value = drafts;
+                if (!selectedCommunicationId.value && communicationTools.value.length) {
+                    selectCommunicationTool(communicationTools.value[0]);
+                } else if (selectedCommunicationId.value) {
+                    const current = communicationTools.value.find((t) => t.id === selectedCommunicationId.value);
+                    if (current) selectCommunicationTool(current, false);
+                }
+                return true;
+            } catch (e) {
+                communicationError.value = String(e && e.message ? e.message : e);
+                return false;
+            } finally {
+                communicationLoading.value = false;
+            }
+        };
+
+        const selectedCommunicationTool = computed(() => {
+            return communicationTools.value.find((t) => t.id === selectedCommunicationId.value) || null;
+        });
+
+        const selectCommunicationTool = (tool, clearMessages = true) => {
+            if (!tool) return;
+            selectedCommunicationId.value = tool.id;
+            communicationDrafts.value = {
+                ...communicationDrafts.value,
+                [tool.id]: {
+                    app_id: tool.app_id || '',
+                    secret: '',
+                    allowed_users: Array.isArray(tool.allowed_users) ? tool.allowed_users.join('\n') : ''
+                }
+            };
+            if (clearMessages) {
+                communicationNotice.value = '';
+                communicationError.value = '';
+            }
+            nextTick(() => {
+                if (window.lucide) lucide.createIcons();
+            });
+        };
+
+        const communicationStatusClass = (statusName) => {
+            if (statusName === 'ok') return 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300';
+            if (statusName === 'failed') return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300';
+            return 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-300';
+        };
+
+        const communicationStatusDotClass = (statusName) => {
+            if (statusName === 'ok') return 'bg-green-500';
+            if (statusName === 'failed') return 'bg-red-500';
+            return 'bg-gray-400';
+        };
+
+        const communicationStatusText = (statusName) => {
+            if (statusName === 'ok') return '通信成功';
+            if (statusName === 'failed') return '未通信';
+            return '未配置';
+        };
+
+        const communicationDraft = (tool) => {
+            if (!tool) return { app_id: '', secret: '', allowed_users: '' };
+            if (!communicationDrafts.value[tool.id]) {
+                communicationDrafts.value = {
+                    ...communicationDrafts.value,
+                    [tool.id]: {
+                        app_id: tool.app_id || '',
+                        secret: '',
+                        allowed_users: Array.isArray(tool.allowed_users) ? tool.allowed_users.join('\n') : ''
+                    }
+                };
+            }
+            return communicationDrafts.value[tool.id];
+        };
+
+        const communicationDisplayTitle = (tool) => {
+            if (!tool) return '';
+            return [tool.label, tool.name].filter(Boolean).join(' ');
+        };
+
+        const saveCommunicationConfig = async (tool = null) => {
+            const target = tool || selectedCommunicationTool.value;
+            if (!target || communicationSaving.value) return false;
+            const draft = communicationDraft(target);
+            communicationSaving.value = true;
+            communicationBusyId.value = target.id;
+            communicationError.value = '';
+            communicationNotice.value = '';
+            try {
+                const res = await fetch('/api/communication_configs/upsert', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        id: target.id,
+                        app_id: draft.app_id || '',
+                        secret: draft.secret || '',
+                        allowed_users: draft.allowed_users || ''
+                    })
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(data.error || '保存失败');
+                communicationNotice.value = `已保存 ${target.label} 配置`;
+                await fetchCommunicationConfigs();
+                return true;
+            } catch (e) {
+                communicationError.value = String(e && e.message ? e.message : e);
+                return false;
+            } finally {
+                communicationSaving.value = false;
+                communicationBusyId.value = '';
+            }
+        };
+
+        const runCommunicationAction = async (tool, action) => {
+            if (!tool || communicationBusyId.value) return;
+            communicationBusyId.value = tool.id;
+            communicationError.value = '';
+            communicationNotice.value = '';
+            try {
+                if (action === 'start') {
+                    const saved = await saveCommunicationConfig(tool);
+                    if (!saved) return;
+                    communicationBusyId.value = tool.id;
+                }
+                const res = await fetch('/api/communication_configs/action', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id: tool.id, action })
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(data.error || '操作失败');
+                const nextStatus = data && data.tool ? data.tool.status : '';
+                if (action === 'test') {
+                    communicationNotice.value = `${tool.label}连接测试${nextStatus === 'ok' ? '成功' : '失败'}`;
+                } else {
+                    communicationNotice.value = `${tool.label}${action === 'start' ? '连接启动完成' : '连接关闭完成'}`;
+                }
+                await fetchCommunicationConfigs();
+            } catch (e) {
+                communicationError.value = String(e && e.message ? e.message : e);
+            } finally {
+                communicationBusyId.value = '';
             }
         };
 
@@ -1989,6 +2167,25 @@ createApp({
             savePetConfig,
             selectPetSkin,
             resetPetConfig,
+            communicationTools,
+            communicationPath,
+            selectedCommunicationId,
+            selectedCommunicationTool,
+            communicationDrafts,
+            communicationLoading,
+            communicationSaving,
+            communicationBusyId,
+            communicationNotice,
+            communicationError,
+            fetchCommunicationConfigs,
+            selectCommunicationTool,
+            communicationStatusClass,
+            communicationStatusDotClass,
+            communicationStatusText,
+            communicationDraft,
+            communicationDisplayTitle,
+            saveCommunicationConfig,
+            runCommunicationAction,
             copyToClipboard,
             switchLLM,
             stopTask,

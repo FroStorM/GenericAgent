@@ -332,5 +332,8 @@ class AgentChatMixin:
 
 
 from agentmain import GeneraticAgent as _GA
-from continue_cmd import handle_frontend_command as _handle_continue_frontend, install as _install_continue, reset_conversation as _reset_conversation
+try:
+    from frontends.continue_cmd import handle_frontend_command as _handle_continue_frontend, install as _install_continue, reset_conversation as _reset_conversation
+except ModuleNotFoundError:
+    from continue_cmd import handle_frontend_command as _handle_continue_frontend, install as _install_continue, reset_conversation as _reset_conversation
 _install_continue(_GA)

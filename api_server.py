@@ -7,6 +7,7 @@ import asyncio
 import queue
 import traceback
 import shutil
+import subprocess
 from datetime import datetime
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, FileResponse
@@ -1328,6 +1329,130 @@ def _auto_make_url(base, path):
     p = (path or "").strip().lstrip("/")
     return f"{b}/{p}" if p else b
 
+
+COMMUNICATION_TOOLS = {
+    "feishu": {
+        "label": "飞书",
+        "name": "feishu",
+        "id_key": "fs_app_id",
+        "secret_key": "fs_app_secret",
+        "allowed_key": "fs_allowed_users",
+        "script": "fsapp.py",
+        "process_keywords": ("frontends/fsapp.py", "fsapp.py"),
+    },
+    "wechat": {
+        "label": "微信",
+        "name": "WeChat",
+        "id_key": "wechat_bot_id",
+        "secret_key": "wechat_secret",
+        "allowed_key": "wechat_allowed_users",
+        "script": "wechatapp.py",
+        "process_keywords": ("frontends/wechatapp.py", "wechatapp.py"),
+    },
+    "qq": {
+        "label": "QQ",
+        "name": "",
+        "id_key": "qq_app_id",
+        "secret_key": "qq_app_secret",
+        "allowed_key": "qq_allowed_users",
+        "script": "qqapp.py",
+        "process_keywords": ("frontends/qqapp.py", "qqapp.py"),
+    },
+    "dingtalk": {
+        "label": "钉钉",
+        "name": "dingding",
+        "id_key": "dingtalk_client_id",
+        "secret_key": "dingtalk_client_secret",
+        "allowed_key": "dingtalk_allowed_users",
+        "script": "dingtalkapp.py",
+        "process_keywords": ("frontends/dingtalkapp.py", "dingtalkapp.py"),
+    },
+}
+
+
+def _mask_config_secret(value):
+    value = str(value or "")
+    if not value:
+        return ""
+    if len(value) <= 4:
+        return "*" * len(value)
+    return "*" * max(4, len(value) - 4) + value[-4:]
+
+
+def _process_snapshot():
+    try:
+        out = subprocess.check_output(["ps", "-ef"], text=True, stderr=subprocess.DEVNULL, timeout=3)
+        return out
+    except Exception:
+        return ""
+
+
+def _communication_script_path(spec):
+    script = spec.get("script")
+    if not script:
+        return ""
+    candidates = [
+        os.path.join(BASE_DIR, "frontends", script),
+        os.path.join(BASE_DIR, "..", "frontends", script),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontends", script),
+    ]
+    for candidate in candidates:
+        path = os.path.abspath(os.path.normpath(candidate))
+        if os.path.exists(path):
+            return path
+    return os.path.abspath(os.path.join(BASE_DIR, "frontends", script))
+
+
+def _communication_python_path():
+    candidates = [
+        os.environ.get("GA_COMM_PYTHON"),
+        os.path.join(os.path.expanduser("~"), "anaconda3", "envs", "kw", "bin", "python"),
+        "/opt/anaconda3/envs/kw/bin/python",
+        sys.executable,
+    ]
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return sys.executable
+
+
+def _communication_tool_status(tool_id, spec, values, process_text):
+    app_id = str(values.get(spec["id_key"], "") or "").strip()
+    secret = str(values.get(spec["secret_key"], "") or "").strip()
+    allowed = values.get(spec.get("allowed_key", ""), [])
+    if isinstance(allowed, str):
+        allowed = [allowed] if allowed.strip() else []
+    elif not isinstance(allowed, list):
+        allowed = []
+    configured = bool(app_id and (secret or spec.get("optional")))
+    running = bool(configured and process_text and any(k in process_text for k in spec.get("process_keywords", ())))
+    if not configured:
+        status = "unconfigured"
+    elif running:
+        status = "ok"
+    else:
+        status = "failed"
+    return {
+        "id": tool_id,
+        "label": spec["label"],
+        "name": spec.get("name", ""),
+        "status": status,
+        "configured": configured,
+        "running": running,
+        "id_key": spec["id_key"],
+        "secret_key": spec["secret_key"],
+        "allowed_key": spec.get("allowed_key", ""),
+        "app_id": app_id,
+        "has_secret": bool(secret),
+        "secret_masked": _mask_config_secret(secret),
+        "allowed_users": [str(x) for x in allowed if str(x).strip()],
+    }
+
+
+def _communication_log_path(tool_id):
+    root = ensure_dir(os.path.join(get_user_data_dir(), "logs"))
+    return os.path.join(root, f"communication-{tool_id}.log")
+
 def log_api(msg):
     line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
     try:
@@ -2205,6 +2330,106 @@ async def delete_llm_config(request: Request):
     _write_text(path, content)
     err = _reload_agent_state()
     return {"status": "deleted", "agent_init_error": err, "configs": _extract_llm_configs_from_module(values), "llm_list": state.agent.list_llms() if not err else []}
+
+@app.get("/api/communication_configs")
+def list_communication_configs():
+    base = get_user_data_dir()
+    path = resolve_mykey_path(base, prefer_existing=True)
+    values = _load_mykey_module_from_path(path)
+    process_text = _process_snapshot()
+    tools = [
+        _communication_tool_status(tool_id, spec, values, process_text)
+        for tool_id, spec in COMMUNICATION_TOOLS.items()
+    ]
+    return {"tools": tools, "path": str(path) if path else ""}
+
+@app.post("/api/communication_configs/upsert")
+async def upsert_communication_config(request: Request):
+    data = await request.json()
+    tool_id = str(data.get("id") or "").strip()
+    spec = COMMUNICATION_TOOLS.get(tool_id)
+    if not spec:
+        return JSONResponse(status_code=400, content={"error": "unknown communication tool"})
+
+    app_id = data.get("app_id")
+    secret = data.get("secret")
+    allowed_users = data.get("allowed_users", [])
+    if not isinstance(app_id, str):
+        return JSONResponse(status_code=400, content={"error": "app_id must be string"})
+    if secret is not None and not isinstance(secret, str):
+        return JSONResponse(status_code=400, content={"error": "secret must be string"})
+    if isinstance(allowed_users, str):
+        allowed_users = [x.strip() for x in re.split(r"[\n,，]+", allowed_users) if x.strip()]
+    elif isinstance(allowed_users, list):
+        allowed_users = [str(x).strip() for x in allowed_users if str(x).strip()]
+    else:
+        return JSONResponse(status_code=400, content={"error": "allowed_users must be list or string"})
+
+    base = get_user_data_dir()
+    path = resolve_mykey_path(base, prefer_existing=False)
+    module = _load_mykey_module_from_path(path)
+    order, values = _read_mykey_simple_assignments(module)
+    for key in (spec["id_key"], spec["secret_key"], spec.get("allowed_key", "")):
+        if key and key not in order:
+            order.append(key)
+
+    values[spec["id_key"]] = app_id.strip()
+    if secret is not None and secret.strip():
+        values[spec["secret_key"]] = secret.strip()
+    elif spec["secret_key"] not in values:
+        values[spec["secret_key"]] = ""
+    if spec.get("allowed_key"):
+        values[spec["allowed_key"]] = allowed_users
+
+    content = _render_mykey_py(order, values)
+    _write_text(path, content)
+    process_text = _process_snapshot()
+    tool = _communication_tool_status(tool_id, spec, values, process_text)
+    return {"status": "saved", "tool": tool, "path": str(path)}
+
+@app.post("/api/communication_configs/action")
+async def communication_config_action(request: Request):
+    data = await request.json()
+    tool_id = str(data.get("id") or "").strip()
+    action = str(data.get("action") or "").strip()
+    spec = COMMUNICATION_TOOLS.get(tool_id)
+    if not spec:
+        return JSONResponse(status_code=400, content={"error": "unknown communication tool"})
+    if action not in ("test", "start", "stop"):
+        return JSONResponse(status_code=400, content={"error": "unknown action"})
+
+    if action == "start":
+        path = _communication_script_path(spec)
+        if not os.path.exists(path):
+            return JSONResponse(status_code=404, content={"error": f"script not found: {path}"})
+        process_text = _process_snapshot()
+        if not any(k in process_text for k in spec.get("process_keywords", ())):
+            log_path = _communication_log_path(tool_id)
+            python_path = _communication_python_path()
+            with open(log_path, "ab") as log_file:
+                subprocess.Popen(
+                    [python_path, "-u", path],
+                    cwd=os.path.dirname(os.path.abspath(__file__)),
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            time.sleep(1)
+    elif action == "stop":
+        script = spec.get("script", "")
+        if script:
+            try:
+                subprocess.run(["pkill", "-f", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+            except Exception:
+                pass
+            time.sleep(0.5)
+
+    base = get_user_data_dir()
+    path = resolve_mykey_path(base, prefer_existing=True)
+    values = _load_mykey_module_from_path(path)
+    process_text = _process_snapshot()
+    tool = _communication_tool_status(tool_id, spec, values, process_text)
+    return {"status": "ok", "action": action, "tool": tool, "python": _communication_python_path()}
 
 @app.get("/api/todo")
 def get_todo():

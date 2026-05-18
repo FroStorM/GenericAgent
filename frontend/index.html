@@ -1046,9 +1046,9 @@
                             <i data-lucide="cat" class="w-4 h-4"></i>
                             桌面宠物
                         </button>
-                        <button @click="reloadAgent" class="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md transition-colors">
-                            <i data-lucide="refresh-cw" class="w-4 h-4"></i>
-                            重载配置/模型
+                        <button @click="openModal('communication')" class="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md transition-colors">
+                            <i data-lucide="radio-tower" class="w-4 h-4"></i>
+                            通讯工具
                         </button>
                         <!-- Workspace 切换功能已禁用 -->
                     </div>
@@ -1199,6 +1199,7 @@
                         <template v-else-if="activeModal === 'memory'">记忆文件</template>
                         <template v-else-if="activeModal === 'backup'">数据备份</template>
                         <template v-else-if="activeModal === 'pet'">桌面宠物</template>
+                        <template v-else-if="activeModal === 'communication'">通讯工具</template>
                     </div>
                     <button @click="closeModal" class="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-500 dark:text-gray-300">
                         <i data-lucide="x" class="w-5 h-5"></i>
@@ -1265,6 +1266,50 @@
                                     <button @click="testKeyEditor" :disabled="keyEditorBusy" :class="keyEditorBusy ? 'opacity-60 cursor-not-allowed' : ''" class="px-3 py-2 text-sm rounded-md bg-gray-200 hover:bg-gray-300 text-gray-800 dark:bg-gray-700 dark:hover:bg-gray-600 dark:text-gray-100 transition-colors">测试 API</button>
                                     <button @click="saveKeyEditor" :disabled="!keyEditorTestOk || keyEditorBusy" :class="(!keyEditorTestOk || keyEditorBusy) ? 'bg-gray-300 hover:bg-gray-300 cursor-not-allowed opacity-50 text-gray-500' : 'bg-cyan-500 hover:bg-cyan-400 text-white shadow-sm'" class="px-3 py-2 text-sm rounded-md transition-colors">保存并重载</button>
                                 </div>
+                            </div>
+                        </div>
+                    </template>
+
+                    <template v-else-if="activeModal === 'communication'">
+                        <div class="space-y-3">
+                            <div class="flex items-center justify-end gap-3">
+                                <button @click="fetchCommunicationConfigs" :disabled="communicationLoading" class="text-xs px-2 py-1 rounded border border-blue-700 text-blue-800 hover:bg-blue-50 dark:border-blue-400 dark:text-blue-200 dark:hover:bg-blue-900/30 transition-colors">刷新状态</button>
+                            </div>
+                            <div v-if="communicationNotice" class="text-sm text-green-700 dark:text-green-400">{{ communicationNotice }}</div>
+                            <div v-if="communicationError" class="text-sm text-red-600 dark:text-red-400">{{ communicationError }}</div>
+
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                <div v-for="tool in communicationTools" :key="tool.id" class="border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-900 p-4 shadow-sm">
+                                    <div class="flex items-center justify-between gap-3 mb-4">
+                                        <div class="min-w-0">
+                                            <div class="text-base font-semibold text-gray-900 dark:text-gray-100 truncate">{{ communicationDisplayTitle(tool) }}</div>
+                                            <div class="text-xs text-gray-400 truncate">{{ tool.app_id || tool.id_key }}</div>
+                                        </div>
+                                        <button @click="runCommunicationAction(tool, 'test')" :title="communicationStatusText(tool.status)" class="shrink-0 inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium border transition-colors" :class="communicationStatusClass(tool.status)">
+                                            <span class="w-2 h-2 rounded-full" :class="communicationStatusDotClass(tool.status)"></span>
+                                            {{ communicationStatusText(tool.status) }}
+                                        </button>
+                                    </div>
+
+                                    <div class="space-y-3">
+                                        <div>
+                                            <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">APPID</label>
+                                            <input v-model="communicationDraft(tool).app_id" class="w-full h-9 bg-gray-50 dark:bg-gray-950 border border-gray-300 dark:border-gray-700 rounded px-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500/50" :placeholder="tool.id_key" />
+                                        </div>
+                                        <div>
+                                            <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">APPSecret</label>
+                                            <input v-model="communicationDraft(tool).secret" type="password" class="w-full h-9 bg-gray-50 dark:bg-gray-950 border border-gray-300 dark:border-gray-700 rounded px-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500/50" :placeholder="tool.has_secret ? ('已配置 ' + tool.secret_masked) : tool.secret_key" />
+                                        </div>
+                                        <div class="flex flex-wrap justify-end gap-2 pt-1">
+                                            <button @click="runCommunicationAction(tool, 'test')" :disabled="communicationBusyId === tool.id" class="px-3 py-2 text-sm rounded-md bg-gray-200 hover:bg-gray-300 text-gray-800 dark:bg-gray-700 dark:hover:bg-gray-600 dark:text-gray-100 disabled:opacity-50 transition-colors">连接测试</button>
+                                            <button @click="runCommunicationAction(tool, 'start')" :disabled="communicationBusyId === tool.id" class="px-3 py-2 text-sm rounded-md bg-cyan-500 hover:bg-cyan-400 text-white disabled:opacity-50 transition-colors">连接启动</button>
+                                            <button @click="runCommunicationAction(tool, 'stop')" :disabled="communicationBusyId === tool.id" class="px-3 py-2 text-sm rounded-md bg-gray-200 hover:bg-gray-300 text-gray-800 dark:bg-gray-700 dark:hover:bg-gray-600 dark:text-gray-100 disabled:opacity-50 transition-colors">连接关闭</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="text-xs text-gray-500 dark:text-gray-400">
+                                绿色表示检测到对应通讯进程；红色表示已配置但当前未通信；灰色表示缺少必要配置。启动前会自动保存当前 APPID/APPSecret。
                             </div>
                         </div>
                     </template>
